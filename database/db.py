@@ -1,10 +1,39 @@
 import aiosqlite
+from contextlib import asynccontextmanager
 
 DB_NAME = "agency.db"
 
+_db_conn: aiosqlite.Connection | None = None
+
+
+@asynccontextmanager
+async def get_db():
+    """
+    Переиспользует единое постоянное соединение с SQLite в режиме WAL.
+    Исключает создание десятков потоков на каждый клик и ошибки 'database is locked'.
+    """
+    global _db_conn
+    if _db_conn is None:
+        _db_conn = await aiosqlite.connect(DB_NAME, timeout=30.0)
+        _db_conn.row_factory = aiosqlite.Row
+        await _db_conn.execute("PRAGMA journal_mode=WAL")
+        await _db_conn.execute("PRAGMA synchronous=NORMAL")
+        await _db_conn.execute("PRAGMA busy_timeout=15000")
+        await _db_conn.commit()
+    yield _db_conn
+
+
+async def close_db():
+    """Корректное закрытие соединения при остановке бота."""
+    global _db_conn
+    if _db_conn is not None:
+        await _db_conn.close()
+        _db_conn = None
+
+
 async def init_db():
-    """Создание таблиц универсального движка экранов, пользователей и CRM."""
-    async with aiosqlite.connect(DB_NAME) as db:
+    """Создание таблиц и однократная миграция при старте бота."""
+    async with get_db() as db:
         # 1. Таблица пользователей с гранулярными правами доступа
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -14,12 +43,13 @@ async def init_db():
                 full_name TEXT DEFAULT '',
                 saved_name TEXT DEFAULT '',
                 phone TEXT DEFAULT '',
-                role TEXT DEFAULT 'client',         -- 'owner', 'staff', 'client'
-                can_leads INTEGER DEFAULT 1,        -- Доступ к заявкам и CRM
-                can_calc INTEGER DEFAULT 0,         -- Доступ к настройке сметы
-                can_content INTEGER DEFAULT 0,      -- Доступ к редактированию экранов
-                can_broadcast INTEGER DEFAULT 0,    -- Доступ к рассылкам
-                can_export INTEGER DEFAULT 1,       -- Доступ к выгрузке Excel
+                role TEXT DEFAULT 'client',
+                role_title TEXT DEFAULT 'Менеджер',
+                can_leads INTEGER DEFAULT 1,
+                can_calc INTEGER DEFAULT 0,
+                can_content INTEGER DEFAULT 0,
+                can_broadcast INTEGER DEFAULT 0,
+                can_export INTEGER DEFAULT 1,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -105,8 +135,9 @@ async def init_db():
         """)
         await db.commit()
 
-        # Автомиграция колонок прав доступа
+        # Автомиграция колонок (выполняется ТОЛЬКО 1 раз при запуске бота!)
         user_cols = [
+            ("role_title", "TEXT DEFAULT 'Менеджер'"),
             ("can_leads", "INTEGER DEFAULT 1"),
             ("can_calc", "INTEGER DEFAULT 0"),
             ("can_content", "INTEGER DEFAULT 0"),
