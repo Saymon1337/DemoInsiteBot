@@ -1,20 +1,17 @@
 import html
 import re
 import logging
-import aiosqlite
 from aiogram import Router, F
 from aiogram.types import (
-    Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
+    Message, CallbackQuery, InlineKeyboardButton,
     BotCommand, BotCommandScopeChat
 )
 from aiogram.filters import CommandStart, Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramBadRequest
 
-from config import OWNER_ID
-from database.db import DB_NAME
 from database.queries import (
-    get_node, get_node_buttons, get_or_create_session,
+    get_node, get_node_buttons, get_button_by_id, get_or_create_session,
     update_session_node, pop_session_history, toggle_multiselect_option,
     save_session_answer, reset_session, get_user_permissions,
     get_user_profile, save_user_profile, add_or_update_user, get_setting
@@ -26,7 +23,6 @@ logger = logging.getLogger(__name__)
 
 PHONE_REGEX = re.compile(r"^[\+]?[0-9\s\-\(\)]{10,18}$")
 
-# Соответствие каналов продвижения и экранов ввода ссылок (стр. 18-19 ТЗ)
 PROMO_CHANNEL_LINKS = [
     ("Сайт", "promo_link_site"),
     ("Соцсети", "promo_link_social"),
@@ -36,7 +32,6 @@ PROMO_CHANNEL_LINKS = [
     ("Яндекс Услуги", "promo_link_yaserv"),
 ]
 
-# Условные уточняющие вопросы по текущему продвижению (стр. 19-20 ТЗ)
 PROMO_STATUS_FOLLOWUPS = [
     ("Да, через платную рекламу", "promo_current_paid_input"),
     ("Да, но не знаю точно, что это", "promo_current_unknown_input"),
@@ -44,8 +39,15 @@ PROMO_STATUS_FOLLOWUPS = [
 ]
 
 
+async def safe_answer(callback: CallbackQuery, text: str = None, show_alert: bool = False):
+    """Безопасный ответ на callback, чтобы сетевая задержка никогда не прерывала переход по меню."""
+    try:
+        await callback.answer(text=text, show_alert=show_alert)
+    except Exception:
+        pass
+
+
 def is_valid_link(text: str) -> bool:
-    """Проверяет наличие ссылки, домена или @username (разрешает комментарии после ссылки)."""
     t = text.strip()
     if not t:
         return False
@@ -89,7 +91,6 @@ async def render_node(bot, user_id: int, node_id: str, message: Message = None, 
         is_client_preview=is_client_preview
     )
 
-    # Удобная кнопка автоподстановки ранее сохраненных Имени и Телефона (не скрывая сам экран ТЗ)
     if node_id in ("final_lead_name", "final_lead_phone"):
         profile = await get_user_profile(user_id)
         if profile:
@@ -106,7 +107,6 @@ async def render_node(bot, user_id: int, node_id: str, message: Message = None, 
 
     text_to_show = node.get("text", "Главное меню")
 
-    # Актуализация контактов из настроек для экрана "Связаться с нами"
     if node_id == "contacts_screen":
         tg = await get_setting("agency_telegram", "@site_it")
         phone = await get_setting("agency_phone", "+7 999 155-10-43")
@@ -185,7 +185,9 @@ async def cmd_cancel(message: Message, state: FSMContext):
 
 
 @router.message(Command("contacts"))
-async def cmd_contacts(message: Message):
+async def cmd_contacts(message: Message, state: FSMContext):
+    await state.clear()
+    await update_session_node(message.from_user.id, "contacts_screen", push_history=True)
     await render_node(message.bot, message.from_user.id, node_id="contacts_screen", message=message)
 
 
@@ -198,8 +200,9 @@ async def redirect_to_admin(message: Message, state: FSMContext):
 # ----------------- 2. АВТОПОДСТАНОВКА ИМЕНИ И ТЕЛЕФОНА -----------------
 
 @router.callback_query(F.data == "autofill_name")
-async def handle_autofill_name(callback: CallbackQuery):
-    await callback.answer()
+async def handle_autofill_name(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await safe_answer(callback)
     user_id = callback.from_user.id
     profile = await get_user_profile(user_id)
     name = (profile or {}).get("saved_name") or callback.from_user.first_name or "Клиент"
@@ -209,8 +212,9 @@ async def handle_autofill_name(callback: CallbackQuery):
 
 
 @router.callback_query(F.data == "autofill_phone")
-async def handle_autofill_phone(callback: CallbackQuery):
-    await callback.answer()
+async def handle_autofill_phone(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await safe_answer(callback)
     user_id = callback.from_user.id
     profile = await get_user_profile(user_id)
     phone = (profile or {}).get("phone") or ""
@@ -223,20 +227,16 @@ async def handle_autofill_phone(callback: CallbackQuery):
 # ----------------- 3. КНОПКИ НАВИГАЦИИ -----------------
 
 @router.callback_query(F.data.startswith("btn:"))
-async def process_button_click(callback: CallbackQuery):
-    await callback.answer()
+async def process_button_click(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await safe_answer(callback)
     btn_id = int(callback.data.split(":")[1])
     user_id = callback.from_user.id
 
-    async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM buttons WHERE id = ?", (btn_id,)) as cursor:
-            btn_row = await cursor.fetchone()
-
-    if not btn_row:
+    btn = await get_button_by_id(btn_id)
+    if not btn:
         return
 
-    btn = dict(btn_row)
     action = btn.get("action_type", "navigate")
     target_node = btn.get("target_node_id", "")
     btn_text = btn.get("text", "")
@@ -256,7 +256,6 @@ async def process_button_click(callback: CallbackQuery):
         return
 
     if action == "navigate" and target_node:
-        # При возврате в главное меню начинаем чистый расчет новой ветки
         if target_node == "main_menu":
             await reset_session(user_id, keep_privacy=True)
             await update_session_node(user_id, "main_menu", push_history=False)
@@ -271,15 +270,12 @@ async def process_button_click(callback: CallbackQuery):
         node_days = answers.get("_node_days", {})
 
         if curr_type == "multiselect":
-            # Если на экране мультивыбора нажата кнопка "Другое / Иное / Добавить свой вариант" —
-            # сохраняем уже отмеченные чекбоксы и их веса, не затирая список!
             selected_items = answers.get(current_node_id, [])
             if isinstance(selected_items, list) and selected_items:
                 all_btns = await get_node_buttons(current_node_id)
                 node_budgets[current_node_id] = sum(float(b.get("budget_weight", 0.0)) for b in all_btns if b["text"] in selected_items)
                 node_days[current_node_id] = sum(int(b.get("timeline_days", 0)) for b in all_btns if b["text"] in selected_items)
         else:
-            # Не записываем в бриф служебные переходы разделов и портфолио
             skip_answer_nodes = {"main_menu", "privacy_block", "site_sections_category", "portfolio_spheres", "contacts_screen"}
             if current_node_id not in skip_answer_nodes:
                 await save_session_answer(user_id, current_node_id, btn_text)
@@ -289,7 +285,6 @@ async def process_button_click(callback: CallbackQuery):
         await save_session_answer(user_id, "_node_budgets", node_budgets)
         await save_session_answer(user_id, "_node_days", node_days)
 
-        # Специальный маршрут для ветки "Товары и услуги": после дизайна задаем вопрос про разные потоки (стр. 18 ТЗ)
         if current_node_id == "design_style_page" and target_node == "design_examples_page":
             site_type = str(answers.get("new_site_type", ""))
             if "Товары и услуги" in site_type or "combo_priority" in answers:
@@ -299,7 +294,6 @@ async def process_button_click(callback: CallbackQuery):
         await render_node(callback.bot, user_id, target_node, callback=callback)
         return
 
-    # Финальная отправка заявки (работает и для клиентов, и для Владельца/админа при проверке!)
     if action == "action" and target_node.startswith("submit_lead:"):
         preferred_time = target_node.split(":", 1)[1]
         await save_session_answer(user_id, "preferred_time", preferred_time)
@@ -312,26 +306,22 @@ async def process_button_click(callback: CallbackQuery):
 # ----------------- 4. ЧЕКБОКСЫ (МУЛЬТИВЫБОР) -----------------
 
 @router.callback_query(F.data.startswith("tog:"))
-async def process_toggle_checkbox(callback: CallbackQuery):
+async def process_toggle_checkbox(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
     btn_id = int(callback.data.split(":")[1])
     user_id = callback.from_user.id
 
-    async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM buttons WHERE id = ?", (btn_id,)) as cursor:
-            btn_row = await cursor.fetchone()
-
-    if not btn_row:
-        await callback.answer()
+    btn = await get_button_by_id(btn_id)
+    if not btn:
+        await safe_answer(callback)
         return
 
-    btn = dict(btn_row)
     btn_text = btn.get("text", "")
     session = await get_or_create_session(user_id)
     current_node_id = session["current_node_id"]
 
     selected = await toggle_multiselect_option(user_id, current_node_id, btn_text)
-    await callback.answer()
+    await safe_answer(callback)
 
     node = await get_node(current_node_id)
     buttons = await get_node_buttons(current_node_id)
@@ -346,7 +336,8 @@ async def process_toggle_checkbox(callback: CallbackQuery):
 
 
 @router.callback_query(F.data == "multi_done")
-async def process_multiselect_done(callback: CallbackQuery):
+async def process_multiselect_done(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
     user_id = callback.from_user.id
     session = await get_or_create_session(user_id)
     current_node_id = session["current_node_id"]
@@ -355,10 +346,10 @@ async def process_multiselect_done(callback: CallbackQuery):
     selected_items = answers.get(current_node_id, [])
 
     if not selected_items:
-        await callback.answer("⚠️ Выберите хотя бы один вариант, чтобы продолжить!", show_alert=True)
+        await safe_answer(callback, "⚠️ Выберите хотя бы один вариант, чтобы продолжить!", show_alert=True)
         return
 
-    await callback.answer()
+    await safe_answer(callback)
     if not current_node:
         return
 
@@ -376,7 +367,6 @@ async def process_multiselect_done(callback: CallbackQuery):
 
     next_node = current_node.get("next_node_id") or "main_menu"
 
-    # 1. Сценарий "Что вы хотите продвигать?": открываем поле ввода ссылки для каждого выбранного канала (стр. 18-19 ТЗ)
     if current_node_id == "promo_target":
         queue = [n_id for label, n_id in PROMO_CHANNEL_LINKS if label in selected_items]
         if queue:
@@ -385,18 +375,15 @@ async def process_multiselect_done(callback: CallbackQuery):
         else:
             await save_session_answer(user_id, "_step_queue", [])
 
-    # 2. Сценарий "Сейчас вы уже что-то продвигаете?" (стр. 19-20 ТЗ)
     elif current_node_id == "promo_current_status":
         is_never_or_unsure = any(
-             ("Никогда не продвигали" in item or "Затрудняюсь ответить" in item)
+            ("Никогда не продвигали" in item or "Затрудняюсь ответить" in item)
             for item in selected_items
         )
         if is_never_or_unsure:
-            # По ТЗ стр. 20: для вариантов 6 и 7 — прямой переход к финальному блоку
             await save_session_answer(user_id, "_step_queue", [])
             next_node = "final_lead_name"
         else:
-            # Для вариантов 1-5: задаем уточняющие вопросы (если выбраны 1, 4, 5) и переходим к "Вам кто-то уже помогал?"
             queue = [n_id for label, n_id in PROMO_STATUS_FOLLOWUPS if label in selected_items]
             if queue:
                 queue.append("promo_helped_page")
@@ -411,8 +398,9 @@ async def process_multiselect_done(callback: CallbackQuery):
 
 
 @router.callback_query(F.data == "btn_back")
-async def process_generic_back(callback: CallbackQuery):
-    await callback.answer()
+async def process_generic_back(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await safe_answer(callback)
     user_id = callback.from_user.id
     await save_session_answer(user_id, "_step_queue", [])
     prev_node = await pop_session_history(user_id)
@@ -432,7 +420,6 @@ async def process_text_inputs(message: Message):
     entered_text = message.text.strip()
     node_id = node["id"]
 
-    # Валидация телефона
     if node_id == "final_lead_phone":
         digits_only = re.sub(r"\D", "", entered_text)
         if not PHONE_REGEX.match(entered_text) or len(digits_only) < 10:
@@ -446,7 +433,6 @@ async def process_text_inputs(message: Message):
         name = answers.get("final_lead_name", message.from_user.first_name or "Клиент")
         await save_user_profile(user_id, saved_name=name, phone=entered_text)
 
-    # Валидация ссылок (разрешает комментарии рядом со ссылкой)
     link_nodes = {
         "promo_url_input", "fix_url_input", "input_examples_link",
         "promo_link_site", "promo_link_social", "promo_link_2gis",
@@ -463,7 +449,6 @@ async def process_text_inputs(message: Message):
 
     await save_session_answer(user_id, node_id, entered_text)
 
-    # Проверяем, есть ли следующие шаги в очереди (для каналов продвижения и условий 3.3)
     updated_session = await get_or_create_session(user_id)
     queue = updated_session.get("answers", {}).get("_step_queue", [])
     if isinstance(queue, list) and queue:
