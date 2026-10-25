@@ -2,6 +2,7 @@ import html
 import io
 import re
 import logging
+import aiosqlite
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, BufferedInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
@@ -9,6 +10,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 from config import OWNER_ID
+from database.db import DB_NAME
 from database.queries import (
     get_node, get_node_buttons, update_node_text, add_button, delete_button,
     get_button_by_id, update_button_text, update_button_weights, update_button_target,
@@ -20,8 +22,6 @@ from database.queries import (
 )
 from services.excel_service import generate_leads_excel
 from scenario.loader import seed_scenario_to_db
-from database.db import DB_NAME
-import aiosqlite
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -31,6 +31,7 @@ URL_VALID_REGEX = re.compile(
     re.IGNORECASE
 )
 
+
 def format_and_validate_url(text: str) -> str | None:
     t = text.strip()
     if not URL_VALID_REGEX.match(t):
@@ -38,6 +39,7 @@ def format_and_validate_url(text: str) -> str | None:
     if not t.startswith(("http://", "https://", "tg://")):
         t = "https://" + t
     return t
+
 
 class AdminCMSFSM(StatesGroup):
     waiting_for_new_text = State()
@@ -56,8 +58,10 @@ class AdminCMSFSM(StatesGroup):
     waiting_for_staff_user = State()
     waiting_for_backup_file = State()
 
+
 def is_owner_filter(user_id: int) -> bool:
     return user_id == OWNER_ID
+
 
 def build_dashboard_kb(perms: dict) -> InlineKeyboardMarkup:
     is_owner = perms.get("is_owner", False)
@@ -97,6 +101,7 @@ def build_dashboard_kb(perms: dict) -> InlineKeyboardMarkup:
     kb.append([InlineKeyboardButton(text="❌ Закрыть панель", callback_data="adm_close")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
+
 def build_staff_permissions_kb(staff_user: dict) -> InlineKeyboardMarkup:
     u_id = staff_user["id"]
     c_leads = "✅" if staff_user.get("can_leads", 1) else "⬜"
@@ -123,6 +128,7 @@ def build_staff_permissions_kb(staff_user: dict) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="⬅️ Назад к списку персонала", callback_data="adm_staff_menu")]
     ])
 
+
 # ----------------- 0. АВТОПРИВЯЗКА ГРУППЫ -----------------
 
 @router.message(Command("set_leads_chat"))
@@ -135,9 +141,13 @@ async def cmd_bind_leads_chat(message: Message):
         chat_title = message.chat.title or "Рабочая группа"
         await set_setting("leads_channel_id", chat_id_str)
         await set_setting("leads_channel_title", chat_title)
-        await message.answer(f"🎉 <b>Группа привязана!</b>\n• Название: <b>{html.escape(chat_title)}</b>\n• ID: <code>{chat_id_str}</code>", parse_mode="HTML")
+        await message.answer(
+            f"🎉 <b>Группа привязана!</b>\n• Название: <b>{html.escape(chat_title)}</b>\n• ID: <code>{chat_id_str}</code>",
+            parse_mode="HTML"
+        )
     else:
         await message.answer("⚠️ Отправьте эту команду внутри группы отдела продаж!")
+
 
 # ----------------- 1. ВХОД В ПАНЕЛЬ (/admin) -----------------
 
@@ -147,11 +157,11 @@ async def cmd_admin_panel(message: Message, state: FSMContext):
     username = message.from_user.username or ""
     await add_or_update_user(user_id, username, message.from_user.full_name or "")
     perms = await get_user_permissions(user_id, username)
-    
+
     if not perms.get("is_owner") and not perms.get("is_staff"):
         await message.answer("⛔ У вас нет доступа к панели управления.")
         return
-        
+
     await state.clear()
     role_title = perms.get("role_title", "Администратор")
     await message.answer(
@@ -159,6 +169,7 @@ async def cmd_admin_panel(message: Message, state: FSMContext):
         reply_markup=build_dashboard_kb(perms),
         parse_mode="HTML"
     )
+
 
 @router.callback_query(F.data == "adm_back_dash")
 async def back_to_dash(callback: CallbackQuery, state: FSMContext):
@@ -174,16 +185,19 @@ async def back_to_dash(callback: CallbackQuery, state: FSMContext):
         parse_mode="HTML"
     )
 
+
 @router.callback_query(F.data == "adm_close")
 async def close_dash(callback: CallbackQuery):
     await callback.answer()
     await callback.message.delete()
+
 
 @router.callback_query(F.data == "adm_jump_bot")
 async def jump_to_client_bot(callback: CallbackQuery):
     await callback.answer()
     from handlers.quiz_engine import render_node
     await render_node(callback.bot, callback.from_user.id, "main_menu", callback=callback)
+
 
 # ----------------- 2. ПРЕДПРОСМОТР, СКАЧИВАНИЕ И ВОССТАНОВЛЕНИЕ БЭКАПА -----------------
 
@@ -193,6 +207,7 @@ async def preview_as_client(callback: CallbackQuery):
     node_id = callback.data.split(":")[1]
     from handlers.quiz_engine import render_node
     await render_node(callback.bot, callback.from_user.id, node_id, callback=callback, force_client_view=True)
+
 
 @router.callback_query(F.data == "adm_backup_json")
 async def backup_json_handler(callback: CallbackQuery):
@@ -204,7 +219,7 @@ async def backup_json_handler(callback: CallbackQuery):
     doc = BufferedInputFile(json_str.encode("utf-8"), filename="scenario_backup.json")
     await callback.message.answer_document(document=doc, caption="💾 <b>Резервная копия сценария (JSON)</b>", parse_mode="HTML")
 
-# Восстановление из бэкапа JSON
+
 @router.callback_query(F.data == "adm_restore_json_start")
 async def restore_json_start(callback: CallbackQuery, state: FSMContext):
     if not is_owner_filter(callback.from_user.id):
@@ -219,6 +234,7 @@ async def restore_json_start(callback: CallbackQuery, state: FSMContext):
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="adm_back_dash")]]),
         parse_mode="HTML"
     )
+
 
 @router.message(AdminCMSFSM.waiting_for_backup_file, F.document)
 async def process_backup_file_upload(message: Message, state: FSMContext):
@@ -247,6 +263,7 @@ async def process_backup_file_upload(message: Message, state: FSMContext):
             parse_mode="HTML"
         )
 
+
 # ----------------- 3. КОНСТРУКТОР ЭКРАНОВ И КНОПОК -----------------
 
 @router.callback_query(F.data.startswith("adm_add_btn:"))
@@ -258,20 +275,21 @@ async def add_btn_start(callback: CallbackQuery, state: FSMContext):
         return
     node_id = callback.data.split(":")[1]
     curr_node = await get_node(node_id)
-    
+
     await state.update_data(target_node_id=node_id, current_node_type=curr_node.get("node_type", "regular") if curr_node else "regular")
     await state.set_state(AdminCMSFSM.waiting_for_btn_name)
 
     if curr_node and curr_node.get("node_type") == "multiselect":
         prompt = f"➕ <b>Добавление варианта ответа (чекбокса) на экран:</b> <code>{node_id}</code>\n\nНапишите название пункта (например: <i>Минимализм</i>):"
     else:
-        prompt = f"➕ <b>Добавление кнопки на экран:</b> <code>{node_id}</code>\n\nНапишите название кнопки (например: <i>🔥 Портфолио за 2026 год</i>):"
+        prompt = f"➕ <b>Добавление кнопки на экран:</b> <code>{node_id}</code>\n\nНапишите название кнопки (например: <i>🔥 Наши кейсы</i>):"
 
     await callback.message.answer(
         prompt,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="adm_cancel_edit")]]),
         parse_mode="HTML"
     )
+
 
 @router.message(AdminCMSFSM.waiting_for_btn_name)
 async def process_btn_name(message: Message, state: FSMContext):
@@ -280,13 +298,12 @@ async def process_btn_name(message: Message, state: FSMContext):
     curr_type = data.get("current_node_type", "regular")
     node_id = data.get("target_node_id")
 
-    # Для мультивыбора кнопка сразу создается как чекбокс toggle!
     if curr_type == "multiselect":
         await add_button(node_id=node_id, text=btn_name, action_type="toggle", target_node_id="", url="")
         await state.clear()
         await message.answer(
             f"✅ <b>Чекбокс «{html.escape(btn_name)}» успешно добавлен!</b>",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="👁 Посмотреть экран", callback_data=f"adm_preview_node:{node_id}")]]) ,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="👁 Посмотреть экран", callback_data=f"adm_preview_node:{node_id}")]]),
             parse_mode="HTML"
         )
         return
@@ -301,6 +318,7 @@ async def process_btn_name(message: Message, state: FSMContext):
     ])
     await message.answer("Шаг 2: Что должна делать эта кнопка при нажатии?", reply_markup=kb)
 
+
 @router.callback_query(F.data == "btn_act_create_node", AdminCMSFSM.waiting_for_btn_action)
 async def btn_create_new_node_start(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
@@ -312,6 +330,7 @@ async def btn_create_new_node_start(callback: CallbackQuery, state: FSMContext):
         parse_mode="HTML"
     )
 
+
 @router.message(AdminCMSFSM.waiting_for_new_node_text)
 async def process_new_node_text_creation(message: Message, state: FSMContext):
     await state.update_data(new_node_text=message.text.strip())
@@ -322,6 +341,7 @@ async def process_new_node_text_creation(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="✍️ Экран с вводом текста от клиента", callback_data="nntype:input_text")]
     ])
     await message.answer("Шаг 3: Выберите тип поведения нового экрана:", reply_markup=kb)
+
 
 @router.callback_query(F.data.startswith("nntype:"), AdminCMSFSM.waiting_for_new_node_type)
 async def process_new_node_type_chosen(callback: CallbackQuery, state: FSMContext):
@@ -340,6 +360,7 @@ async def process_new_node_type_chosen(callback: CallbackQuery, state: FSMContex
     else:
         await finalize_node_creation(callback, state, next_dest="")
 
+
 @router.callback_query(F.data.startswith("dest:"), AdminCMSFSM.waiting_for_new_node_dest)
 async def process_new_node_dest_chosen(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
@@ -348,6 +369,7 @@ async def process_new_node_dest_chosen(callback: CallbackQuery, state: FSMContex
     parent_id = data.get("target_node_id")
     final_dest = parent_id if dest_code == "parent" else dest_code
     await finalize_node_creation(callback, state, next_dest=final_dest)
+
 
 async def finalize_node_creation(callback: CallbackQuery, state: FSMContext, next_dest: str):
     data = await state.get_data()
@@ -373,6 +395,7 @@ async def finalize_node_creation(callback: CallbackQuery, state: FSMContext, nex
         parse_mode="HTML"
     )
 
+
 @router.callback_query(F.data == "btn_act_pick_node", AdminCMSFSM.waiting_for_btn_action)
 async def btn_pick_existing_node(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
@@ -383,6 +406,7 @@ async def btn_pick_existing_node(callback: CallbackQuery, state: FSMContext):
         kb.append([InlineKeyboardButton(text=f"📄 {n['id']} ({clean_preview}...)", callback_data=f"pick_target:{n['id']}")])
     kb.append([InlineKeyboardButton(text="❌ Отмена", callback_data="adm_cancel_edit")])
     await callback.message.edit_text("Выберите экран для перехода:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
 
 @router.callback_query(F.data.startswith("pick_target:"))
 async def process_picked_node_target(callback: CallbackQuery, state: FSMContext):
@@ -395,9 +419,10 @@ async def process_picked_node_target(callback: CallbackQuery, state: FSMContext)
     await state.clear()
     await callback.message.edit_text(
         f"✅ Кнопка «<b>{html.escape(btn_name)}</b>» теперь ведет на экран <code>{target_node}</code>!",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="👁 Посмотреть", callback_data=f"adm_preview_node:{parent_node}")]]) ,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="👁 Посмотреть", callback_data=f"adm_preview_node:{parent_node}")]]),
         parse_mode="HTML"
     )
+
 
 @router.callback_query(F.data == "btn_act_url", AdminCMSFSM.waiting_for_btn_action)
 async def btn_action_url_chosen(callback: CallbackQuery, state: FSMContext):
@@ -405,6 +430,7 @@ async def btn_action_url_chosen(callback: CallbackQuery, state: FSMContext):
     await state.update_data(btn_action_type="url")
     await state.set_state(AdminCMSFSM.waiting_for_btn_target)
     await callback.message.edit_text("Отправьте полную ссылку на сайт (например: <code>https://mysite.ru</code>):", parse_mode="HTML")
+
 
 @router.message(AdminCMSFSM.waiting_for_btn_target)
 async def process_btn_target(message: Message, state: FSMContext):
@@ -418,9 +444,10 @@ async def process_btn_target(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(
         f"🎉 <b>Кнопка-ссылка «{html.escape(data.get('btn_name'))}» добавлена!</b>",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="👁 Посмотреть", callback_data=f"adm_preview_node:{data.get('target_node_id')}")]]) ,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="👁 Посмотреть", callback_data=f"adm_preview_node:{data.get('target_node_id')}")]]),
         parse_mode="HTML"
     )
+
 
 @router.callback_query(F.data.startswith("adm_del_node:"))
 async def delete_node_prompt(callback: CallbackQuery):
@@ -436,6 +463,7 @@ async def delete_node_prompt(callback: CallbackQuery):
     ])
     await callback.message.edit_text(f"⚠️ Удалить экран <code>{node_id}</code> и все ведущие на него кнопки?", reply_markup=kb, parse_mode="HTML")
 
+
 @router.callback_query(F.data.startswith("adm_del_node_exec:"))
 async def delete_node_execute(callback: CallbackQuery):
     node_id = callback.data.split(":")[1]
@@ -444,6 +472,7 @@ async def delete_node_execute(callback: CallbackQuery):
     if ok:
         from handlers.quiz_engine import render_node
         await render_node(callback.bot, callback.from_user.id, "main_menu", callback=callback)
+
 
 # ----------------- 4. НАСТРОЙКА КНОПОК И ССЫЛОК -----------------
 
@@ -460,14 +489,15 @@ async def list_node_buttons(callback: CallbackQuery):
     if not content_btns:
         await callback.answer("На этом экране нет настраиваемых кнопок.", show_alert=True)
         return
-        
+
     kb = []
     for pos, b in enumerate(content_btns, start=1):
         btn_title = f"{pos}. {b['text'][:22]}"
         kb.append([InlineKeyboardButton(text=f"⚙️ {btn_title}", callback_data=f"adm_btn_opt:{b['id']}:{node_id}")])
-        
+
     kb.append([InlineKeyboardButton(text="⬅️ Назад к экрану", callback_data=f"adm_preview_node:{node_id}")])
     await callback.message.edit_text(f"⚙️ <b>Кнопки экрана:</b> <code>{node_id}</code>\nВыберите кнопку:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="HTML")
+
 
 @router.callback_query(F.data.startswith("adm_btn_opt:"))
 async def button_options_card(callback: CallbackQuery):
@@ -504,21 +534,24 @@ async def button_options_card(callback: CallbackQuery):
     ])
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
+
 @router.callback_query(F.data.startswith("adm_b_up:"))
 async def move_btn_up_handler(callback: CallbackQuery):
     parts = callback.data.split(":")
-    btn_id, node_id = int(parts[1]), parts[2]
+    btn_id, _ = int(parts[1]), parts[2]
     await swap_button_step(btn_id, "up")
     await callback.answer("Перемещено выше!")
     await button_options_card(callback)
 
+
 @router.callback_query(F.data.startswith("adm_b_down:"))
 async def move_btn_down_handler(callback: CallbackQuery):
     parts = callback.data.split(":")
-    btn_id, node_id = int(parts[1]), parts[2]
+    btn_id, _ = int(parts[1]), parts[2]
     await swap_button_step(btn_id, "down")
     await callback.answer("Перемещено ниже!")
     await button_options_card(callback)
+
 
 @router.callback_query(F.data.startswith("adm_b_pos:"))
 async def move_btn_exact_pos_start(callback: CallbackQuery, state: FSMContext):
@@ -540,6 +573,7 @@ async def move_btn_exact_pos_start(callback: CallbackQuery, state: FSMContext):
         parse_mode="HTML"
     )
 
+
 @router.message(AdminCMSFSM.waiting_for_btn_reorder)
 async def process_btn_reorder_input(message: Message, state: FSMContext):
     txt = message.text.strip()
@@ -552,7 +586,7 @@ async def process_btn_reorder_input(message: Message, state: FSMContext):
         await message.answer(f"⚠️ Введите число от 1 до {total}:")
         return
 
-    ok, old_p, new_p = await move_button_to_position(btn_id, int(txt))
+    _, old_p, new_p = await move_button_to_position(btn_id, int(txt))
     await state.clear()
     await message.answer(
         f"✅ Кнопка перемещена с {old_p}-го на <b>{new_p}-е место</b>!",
@@ -563,6 +597,7 @@ async def process_btn_reorder_input(message: Message, state: FSMContext):
         parse_mode="HTML"
     )
 
+
 @router.callback_query(F.data.startswith("adm_eburl:"))
 async def edit_btn_url_start(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
@@ -571,6 +606,7 @@ async def edit_btn_url_start(callback: CallbackQuery, state: FSMContext):
     await state.update_data(editing_btn_id=btn_id, parent_node_id=node_id)
     await state.set_state(AdminCMSFSM.waiting_for_btn_edit_url)
     await callback.message.edit_text("Отправьте новую ссылку для этой кнопки:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data=f"adm_btn_opt:{btn_id}:{node_id}")]]))
+
 
 @router.message(AdminCMSFSM.waiting_for_btn_edit_url)
 async def process_btn_new_url(message: Message, state: FSMContext):
@@ -582,7 +618,12 @@ async def process_btn_new_url(message: Message, state: FSMContext):
     btn_id, node_id = data.get("editing_btn_id"), data.get("parent_node_id")
     await update_button_target(btn_id, "url", valid_url)
     await state.clear()
-    await message.answer(f"✅ Ссылка обновлена!", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="👁 Посмотреть", callback_data=f"adm_preview_node:{node_id}")]]) , parse_mode="HTML")
+    await message.answer(
+        "✅ Ссылка обновлена!",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="👁 Посмотреть", callback_data=f"adm_preview_node:{node_id}")]]),
+        parse_mode="HTML"
+    )
+
 
 @router.callback_query(F.data.startswith("adm_ebt:"))
 async def edit_btn_text_start(callback: CallbackQuery, state: FSMContext):
@@ -593,6 +634,7 @@ async def edit_btn_text_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(AdminCMSFSM.waiting_for_btn_edit_text)
     await callback.message.edit_text("Отправьте новый текст для этой кнопки:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data=f"adm_btn_opt:{btn_id}:{node_id}")]]))
 
+
 @router.message(AdminCMSFSM.waiting_for_btn_edit_text)
 async def process_btn_new_text(message: Message, state: FSMContext):
     data = await state.get_data()
@@ -600,10 +642,15 @@ async def process_btn_new_text(message: Message, state: FSMContext):
     new_txt = message.text.strip()
     await update_button_text(btn_id, new_txt)
     await state.clear()
-    await message.answer(f"✅ Текст кнопки изменен на: «{html.escape(new_txt)}»", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👁 Посмотреть экран", callback_data=f"adm_preview_node:{node_id}")],
-        [InlineKeyboardButton(text="⚙️ Кнопки", callback_data=f"adm_list_btns:{node_id}")]
-    ]), parse_mode="HTML")
+    await message.answer(
+        f"✅ Текст кнопки изменен на: «{html.escape(new_txt)}»",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="👁 Посмотреть экран", callback_data=f"adm_preview_node:{node_id}")],
+            [InlineKeyboardButton(text="⚙️ Кнопки", callback_data=f"adm_list_btns:{node_id}")]
+        ]),
+        parse_mode="HTML"
+    )
+
 
 @router.callback_query(F.data.startswith("adm_dbt:"))
 async def process_delete_btn_confirmed(callback: CallbackQuery):
@@ -613,6 +660,7 @@ async def process_delete_btn_confirmed(callback: CallbackQuery):
     await callback.answer("Кнопка удалена!")
     from handlers.quiz_engine import render_node
     await render_node(callback.bot, callback.from_user.id, node_id, callback=callback)
+
 
 @router.callback_query(F.data.startswith("adm_edit_txt:"))
 async def edit_node_text_start(callback: CallbackQuery, state: FSMContext):
@@ -625,7 +673,12 @@ async def edit_node_text_start(callback: CallbackQuery, state: FSMContext):
     node = await get_node(node_id)
     await state.update_data(editing_node_id=node_id)
     await state.set_state(AdminCMSFSM.waiting_for_new_text)
-    await callback.message.answer(f"✏️ <b>Редактирование экрана:</b> <code>{node_id}</code>\n\nТекущий текст:\n<blockquote>{html.escape(node['text'])}</blockquote>\n\nОтправьте новый текст:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="adm_cancel_edit")]]), parse_mode="HTML")
+    await callback.message.answer(
+        f"✏️ <b>Редактирование экрана:</b> <code>{node_id}</code>\n\nТекущий текст:\n<blockquote>{html.escape(node['text'])}</blockquote>\n\nОтправьте новый текст:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="adm_cancel_edit")]]),
+        parse_mode="HTML"
+    )
+
 
 @router.callback_query(F.data == "adm_cancel_edit")
 async def cancel_edit(callback: CallbackQuery, state: FSMContext):
@@ -633,16 +686,22 @@ async def cancel_edit(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.edit_text("Действие отменено.")
 
+
 @router.message(AdminCMSFSM.waiting_for_new_text)
 async def process_new_node_text(message: Message, state: FSMContext):
     data = await state.get_data()
     node_id = data.get("editing_node_id")
     await update_node_text(node_id, message.text.strip())
     await state.clear()
-    await message.answer(f"✅ <b>Текст экрана '{node_id}' обновлен!</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👁 Посмотреть (Редактор)", callback_data=f"adm_preview_node:{node_id}")],
-        [InlineKeyboardButton(text="👁 Глазами клиента", callback_data=f"adm_client_view:{node_id}")]
-    ]), parse_mode="HTML")
+    await message.answer(
+        f"✅ <b>Текст экрана '{node_id}' обновлен!</b>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="👁 Посмотреть (Редактор)", callback_data=f"adm_preview_node:{node_id}")],
+            [InlineKeyboardButton(text="👁 Глазами клиента", callback_data=f"adm_client_view:{node_id}")]
+        ]),
+        parse_mode="HTML"
+    )
+
 
 @router.callback_query(F.data.startswith("adm_preview_node:"))
 async def preview_node(callback: CallbackQuery):
@@ -650,6 +709,7 @@ async def preview_node(callback: CallbackQuery):
     node_id = callback.data.split(":")[1]
     from handlers.quiz_engine import render_node
     await render_node(callback.bot, callback.from_user.id, node_id, callback=callback)
+
 
 # ----------------- 5. ПЕРСОНАЛ, СМЕТА, ЭКСПОРТ И НАСТРОЙКИ -----------------
 
@@ -674,6 +734,7 @@ async def staff_menu_handler(callback: CallbackQuery):
     kb.append([InlineKeyboardButton(text="⬅️ В панель", callback_data="adm_back_dash")])
     await callback.message.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="HTML")
 
+
 @router.callback_query(F.data.startswith("adm_st_card:"))
 async def staff_card_view(callback: CallbackQuery):
     await callback.answer()
@@ -687,6 +748,7 @@ async def staff_card_view(callback: CallbackQuery):
         reply_markup=build_staff_permissions_kb(target),
         parse_mode="HTML"
     )
+
 
 @router.callback_query(F.data.startswith("adm_preset:"))
 async def apply_preset_handler(callback: CallbackQuery):
@@ -703,6 +765,7 @@ async def apply_preset_handler(callback: CallbackQuery):
             parse_mode="HTML"
         )
 
+
 @router.callback_query(F.data.startswith("adm_tperm:"))
 async def toggle_perm_action(callback: CallbackQuery):
     _, db_id_str, perm_key = callback.data.split(":")
@@ -713,6 +776,7 @@ async def toggle_perm_action(callback: CallbackQuery):
     if target:
         await callback.message.edit_reply_markup(reply_markup=build_staff_permissions_kb(target))
 
+
 @router.callback_query(F.data.startswith("adm_rev_st_id:"))
 async def revoke_staff_by_id(callback: CallbackQuery):
     db_id = int(callback.data.split(":")[1])
@@ -722,11 +786,17 @@ async def revoke_staff_by_id(callback: CallbackQuery):
     await callback.answer("Права сняты!", show_alert=True)
     await staff_menu_handler(callback)
 
+
 @router.callback_query(F.data == "adm_add_staff_start")
 async def add_staff_start(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     await state.set_state(AdminCMSFSM.waiting_for_staff_user)
-    await callback.message.edit_text("Отправьте <b>@username</b> или цифровой ID:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="adm_staff_menu")]]), parse_mode="HTML")
+    await callback.message.edit_text(
+        "Отправьте <b>@username</b> или цифровой ID:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="adm_staff_menu")]]),
+        parse_mode="HTML"
+    )
+
 
 @router.message(AdminCMSFSM.waiting_for_staff_user)
 async def process_grant_staff(message: Message, state: FSMContext):
@@ -734,11 +804,16 @@ async def process_grant_staff(message: Message, state: FSMContext):
     db_id = await set_user_role_by_username(username_or_id, role='staff', role_title='Менеджер продаж')
     await state.clear()
     target = await get_staff_by_db_id(db_id)
-    await message.answer(f"✅ Администратор <b>{html.escape(username_or_id)}</b> добавлен!", parse_mode="HTML", reply_markup=build_staff_permissions_kb(target))
+    await message.answer(
+        f"✅ Администратор <b>{html.escape(username_or_id)}</b> добавлен!",
+        parse_mode="HTML",
+        reply_markup=build_staff_permissions_kb(target)
+    )
+
 
 CALC_CATEGORIES = {
-    "cat_shop": ("🛒 Магазин: 1С, Оплата, Доставка", ["goods_payment", "goods_delivery", "goods_stock", "goods_crm", "services_payment", "goods_count"]),
-    "cat_features": ("⚙️ Функционал (ЛК, Квизы, Поиск)", ["goods_features", "services_popup"]),
+    "cat_shop": ("🛒 Магазин: 1С, Оплата, Доставка", ["goods_payment", "goods_delivery", "goods_stock", "goods_crm", "services_payment", "services_crm", "goods_count", "goods_import_format"]),
+    "cat_features": ("⚙️ Функционал и структура", ["goods_features", "services_popup", "services_structure", "services_content", "combo_flows_page"]),
     "cat_design": ("🎨 Дизайн и стилистика", ["design_style_page", "goods_variations"]),
     "cat_promo": ("🚀 Продвижение и реклама", ["promo_target", "promo_types_page", "promo_format_page", "promo_geo_page"]),
     "cat_fix": ("🔧 Доработка сайтов", ["fix_tasks_page"])
@@ -754,6 +829,7 @@ NODE_LABEL_MAP = {
     "services_popup": "💬 Всплывающие окна (Pop-up)"
 }
 
+
 @router.callback_query(F.data == "adm_calc_rates")
 async def calc_categories_menu(callback: CallbackQuery):
     await callback.answer()
@@ -764,6 +840,7 @@ async def calc_categories_menu(callback: CallbackQuery):
     kb = [[InlineKeyboardButton(text=cat_title, callback_data=f"adm_ccat:{cat_key}")] for cat_key, (cat_title, _) in CALC_CATEGORIES.items()]
     kb.append([InlineKeyboardButton(text="⬅️ В панель", callback_data="adm_back_dash")])
     await callback.message.edit_text("🧮 <b>НАСТРОЙКА СМЕТЫ И СРОКОВ</b>\nВыберите категорию:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="HTML")
+
 
 @router.callback_query(F.data.startswith("adm_ccat:"))
 async def calc_category_items(callback: CallbackQuery):
@@ -786,6 +863,7 @@ async def calc_category_items(callback: CallbackQuery):
     kb.append([InlineKeyboardButton(text="⬅️ К категориям", callback_data="adm_calc_rates")])
     await callback.message.edit_text(f"⚙️ <b>{cat_title}</b>:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="HTML")
 
+
 @router.callback_query(F.data.startswith("adm_ecalc:"))
 async def edit_calc_item_start(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
@@ -795,7 +873,12 @@ async def edit_calc_item_start(callback: CallbackQuery, state: FSMContext):
     await state.update_data(editing_btn_id=btn_id, return_cat_key=cat_key)
     await state.set_state(AdminCMSFSM.waiting_for_btn_calc)
     title = NODE_LABEL_MAP.get(btn["node_id"], btn["node_id"]) if btn["text"].strip().lower() == "да" else btn["text"]
-    await callback.message.edit_text(f"⚙️ <b>{html.escape(title)}</b>\nОтправьте стоимость (₽) и дни:\n<code>20000 4</code>", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data=f"adm_ccat:{cat_key}")]]), parse_mode="HTML")
+    await callback.message.edit_text(
+        f"⚙️ <b>{html.escape(title)}</b>\nОтправьте стоимость (₽) и дни:\n<code>20000 4</code>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data=f"adm_ccat:{cat_key}")]]),
+        parse_mode="HTML"
+    )
+
 
 @router.message(AdminCMSFSM.waiting_for_btn_calc)
 async def process_calc_weights_save(message: Message, state: FSMContext):
@@ -805,9 +888,13 @@ async def process_calc_weights_save(message: Message, state: FSMContext):
         new_budget, new_days = float(parts[0]), int(parts[1]) if len(parts) > 1 else 0
         await update_button_weights(data.get("editing_btn_id"), new_budget, new_days)
         await state.clear()
-        await message.answer(f"✅ Обновлено: +{int(new_budget):,} ₽, +{new_days} дн.".replace(",", " "), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"adm_ccat:{data.get('return_cat_key', 'cat_shop')}")]]))
+        await message.answer(
+            f"✅ Обновлено: +{int(new_budget):,} ₽, +{new_days} дн.".replace(",", " "),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"adm_ccat:{data.get('return_cat_key', 'cat_shop')}")]])
+        )
     except Exception:
         await message.answer("❌ Формат: <code>25000 5</code>", parse_mode="HTML")
+
 
 @router.callback_query(F.data == "adm_reset_confirm")
 async def reset_scenario_prompt(callback: CallbackQuery):
@@ -818,7 +905,8 @@ async def reset_scenario_prompt(callback: CallbackQuery):
         [InlineKeyboardButton(text="⚠️ ДА, ВОССТАНОВИТЬ ЭКРАНЫ", callback_data="adm_reset_execute")],
         [InlineKeyboardButton(text="⬅️ Отмена", callback_data="adm_back_dash")]
     ])
-    await callback.message.edit_text("🛡 Восстановить стандартные 56 экранов? (Заявки и клиенты не пострадают)", reply_markup=kb)
+    await callback.message.edit_text("🛡 Восстановить стандартные экраны по ТЗ? (Заявки и клиенты не пострадают)", reply_markup=kb)
+
 
 @router.callback_query(F.data == "adm_reset_execute")
 async def reset_scenario_exec(callback: CallbackQuery):
@@ -827,6 +915,7 @@ async def reset_scenario_exec(callback: CallbackQuery):
         return
     await seed_scenario_to_db(force=True)
     await callback.message.edit_text("🎉 Сценарий восстановлен!", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🛠 В панель", callback_data="adm_back_dash")]]))
+
 
 @router.callback_query(F.data == "adm_export_excel")
 async def export_excel_handler(callback: CallbackQuery):
@@ -838,6 +927,7 @@ async def export_excel_handler(callback: CallbackQuery):
     doc_file = BufferedInputFile(excel_stream.read(), filename="leads_agency_export.xlsx")
     await callback.message.answer_document(document=doc_file, caption="📊 <b>Выгрузка заявок агентства</b>", parse_mode="HTML")
 
+
 @router.callback_query(F.data == "adm_leads_stats")
 async def leads_stats_handler(callback: CallbackQuery):
     await callback.answer()
@@ -846,8 +936,24 @@ async def leads_stats_handler(callback: CallbackQuery):
     for l in leads:
         st = l.get("status", "new")
         st_counts[st] = st_counts.get(st, 0) + 1
-    text = f"📊 <b>АНАЛИТИКА ЛИДОВ:</b>\n\n• Всего: <b>{len(leads)}</b>\n• 🆕 Новые: <b>{st_counts['new']}</b>\n• 🟡 В работе: <b>{st_counts['in_progress']}</b>\n• 📞 Созвон: <b>{st_counts['meeting_scheduled']}</b>\n• 🟢 Договор: <b>{st_counts['deal_closed']}</b>\n• 🔴 Отказ: <b>{st_counts['rejected']}</b>"
-    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📥 Скачать Excel", callback_data="adm_export_excel")], [InlineKeyboardButton(text="⬅️ В панель", callback_data="adm_back_dash")]]) , parse_mode="HTML")
+    text = (
+        f"📊 <b>АНАЛИТИКА ЛИДОВ:</b>\n\n"
+        f"• Всего: <b>{len(leads)}</b>\n"
+        f"• 🆕 Новые: <b>{st_counts['new']}</b>\n"
+        f"• 🟡 В работе: <b>{st_counts['in_progress']}</b>\n"
+        f"• 📞 Созвон: <b>{st_counts['meeting_scheduled']}</b>\n"
+        f"• 🟢 Договор: <b>{st_counts['deal_closed']}</b>\n"
+        f"• 🔴 Отказ: <b>{st_counts['rejected']}</b>"
+    )
+    await callback.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📥 Скачать Excel", callback_data="adm_export_excel")],
+            [InlineKeyboardButton(text="⬅️ В панель", callback_data="adm_back_dash")]
+        ]),
+        parse_mode="HTML"
+    )
+
 
 @router.callback_query(F.data == "adm_agency_settings")
 async def agency_settings_menu(callback: CallbackQuery):
@@ -858,8 +964,19 @@ async def agency_settings_menu(callback: CallbackQuery):
     phone = await get_setting("agency_phone", "+7 999 155-10-43")
     email = await get_setting("agency_email", "site-it@mail.ru")
     routing_mode = await get_setting("leads_routing_mode", "both")
-    mode_labels = {"both": "🏢 В группу + 👑 Владельцу", "group_only": "🏢 Только в группу", "owner_only": "👑 Только Владельцу", "all_staff": "📢 Всем менеджерам и в группу"}
-    text = f"⚙️ <b>НАСТРОЙКИ:</b>\n\n• Маршрут: <b>{mode_labels.get(routing_mode, 'В группу + Владельцу')}</b>\n• Telegram: <b>{html.escape(tg)}</b>\n• Телефон: <code>{html.escape(phone)}</code>\n• Email: <code>{html.escape(email)}</code>"
+    mode_labels = {
+        "both": "🏢 В группу + 👑 Владельцу",
+        "group_only": "🏢 Только в группу",
+        "owner_only": "👑 Только Владельцу",
+        "all_staff": "📢 Всем менеджерам и в группу"
+    }
+    text = (
+        f"⚙️ <b>НАСТРОЙКИ:</b>\n\n"
+        f"• Маршрут: <b>{mode_labels.get(routing_mode, 'В группу + Владельцу')}</b>\n"
+        f"• Telegram: <b>{html.escape(tg)}</b>\n"
+        f"• Телефон: <code>{html.escape(phone)}</code>\n"
+        f"• Email: <code>{html.escape(email)}</code>"
+    )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎯 Изменить маршрут заявок", callback_data="adm_leads_route_menu")],
         [InlineKeyboardButton(text="📱 Изменить Telegram", callback_data="adm_set_opt:agency_telegram")],
@@ -868,6 +985,7 @@ async def agency_settings_menu(callback: CallbackQuery):
         [InlineKeyboardButton(text="⬅️ В панель", callback_data="adm_back_dash")]
     ])
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
 
 @router.callback_query(F.data == "adm_leads_route_menu")
 async def leads_route_menu(callback: CallbackQuery):
@@ -881,11 +999,13 @@ async def leads_route_menu(callback: CallbackQuery):
     ])
     await callback.message.edit_text("🎯 <b>Куда отправлять новые заявки?</b>", reply_markup=kb, parse_mode="HTML")
 
+
 @router.callback_query(F.data.startswith("set_route:"))
 async def process_route_choice(callback: CallbackQuery):
     await set_setting("leads_routing_mode", callback.data.split(":")[1])
     await callback.answer("Маршрут обновлен!", show_alert=True)
     await agency_settings_menu(callback)
+
 
 @router.callback_query(F.data.startswith("adm_set_opt:"))
 async def set_opt_start(callback: CallbackQuery, state: FSMContext):
@@ -893,14 +1013,38 @@ async def set_opt_start(callback: CallbackQuery, state: FSMContext):
     opt_key = callback.data.split(":")[1]
     await state.update_data(setting_key=opt_key)
     await state.set_state(AdminCMSFSM.waiting_for_setting_value)
-    await callback.message.edit_text(f"Введите значение для <code>{opt_key}</code>:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="adm_agency_settings")]]), parse_mode="HTML")
+    await callback.message.edit_text(
+        f"Введите значение для <code>{opt_key}</code>:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="adm_agency_settings")]]),
+        parse_mode="HTML"
+    )
+
 
 @router.message(AdminCMSFSM.waiting_for_setting_value)
 async def process_setting_value(message: Message, state: FSMContext):
     data = await state.get_data()
-    await set_setting(data.get("setting_key"), message.text.strip())
+    setting_key = data.get("setting_key")
+    await set_setting(setting_key, message.text.strip())
+
+    # Синхронизируем экран contacts_screen в БД при изменении контактов в настройках
+    if setting_key in ("agency_telegram", "agency_phone", "agency_email"):
+        tg = await get_setting("agency_telegram", "@site_it")
+        phone = await get_setting("agency_phone", "+7 999 155-10-43")
+        email = await get_setting("agency_email", "site-it@mail.ru")
+        new_contacts_text = (
+            "📞 <b>Связаться с нами</b>\n\n"
+            "Если у вас остались вопросы — пишите или звоните!\n"
+            "Мы на связи и с радостью поможем 🤝\n\n"
+            "<b>Контакты:</b>\n"
+            f"• <b>Telegram:</b> {html.escape(tg)}\n"
+            f"• <b>Телефон:</b> {html.escape(phone)}\n"
+            f"• <b>Email:</b> {html.escape(email)}"
+        )
+        await update_node_text("contacts_screen", new_contacts_text)
+
     await state.clear()
     await message.answer("✅ Обновлено!", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ К настройкам", callback_data="adm_agency_settings")]]))
+
 
 @router.callback_query(F.data == "adm_broadcast_start")
 async def broadcast_start(callback: CallbackQuery, state: FSMContext):
@@ -910,7 +1054,12 @@ async def broadcast_start(callback: CallbackQuery, state: FSMContext):
         await callback.answer("⛔ Нет прав.", show_alert=True)
         return
     await state.set_state(AdminCMSFSM.waiting_for_broadcast)
-    await callback.message.edit_text("📢 Отправьте текст для рассылки:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="adm_back_dash")]]), parse_mode="HTML")
+    await callback.message.edit_text(
+        "📢 Отправьте текст для рассылки:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="adm_back_dash")]]),
+        parse_mode="HTML"
+    )
+
 
 @router.message(AdminCMSFSM.waiting_for_broadcast)
 async def process_broadcast_send(message: Message, state: FSMContext):
