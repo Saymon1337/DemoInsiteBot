@@ -1,6 +1,5 @@
-import aiosqlite
 import logging
-from database.db import DB_NAME
+from database.db import get_db
 from scenario.data import SCENARIO_NODES
 
 logger = logging.getLogger(__name__)
@@ -35,14 +34,14 @@ def validate_scenario_graph():
 
 async def seed_scenario_to_db(force: bool = False):
     """
-    Умная синхронизация базы:
+    Умная синхронизация базы через единое соединение get_db():
     - Если force=True (кнопка сброса к заводским) или версия сценария устарела — обновляет базовые экраны и кнопки.
     - Если force=False (обычный перезапуск) — вставляет кнопки ТОЛЬКО если сам экран отсутствовал в БД (cursor.rowcount > 0).
       Благодаря этому любые переименования и удаления кнопок через /admin сохраняются после перезапуска!
     """
     validate_scenario_graph()
 
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_db() as db:
         async with db.execute("SELECT value FROM settings WHERE key = 'scenario_version'") as cur:
             row = await cur.fetchone()
             db_version = row[0] if row else ""
