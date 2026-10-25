@@ -6,28 +6,49 @@ from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKe
 
 from config import OWNER_ID
 from database.queries import (
-    get_or_create_session, create_lead, get_setting, reset_session, 
+    get_or_create_session, create_lead, get_setting, reset_session,
     get_staff_and_owner_ids, get_node
 )
 from keyboards.engine_kb import get_lead_card_kb
 
 logger = logging.getLogger(__name__)
 
-async def calculate_project_estimate(session: dict) -> tuple[str, str]:
-    answers = session.get("answers", {})
-    add_budget = float(answers.get("_calc_budget", 0.0))
-    add_days = int(answers.get("_calc_days", 0))
 
-    branch_type = answers.get("new_site_type", "")
-    if "Товары" in branch_type or "combo" in str(answers):
+async def calculate_project_estimate(session: dict) -> tuple[str, str]:
+    """
+    Точный расчет предварительной сметы и сроков по словарю пройденных экранов
+    (_node_budgets и _node_days) без дублирования при переходах «Назад».
+    """
+    answers = session.get("answers", {})
+    node_budgets = answers.get("_node_budgets", {})
+    node_days = answers.get("_node_days", {})
+
+    if isinstance(node_budgets, dict):
+        add_budget = sum(float(v) for v in node_budgets.values())
+    else:
+        add_budget = float(answers.get("_calc_budget", 0.0))
+
+    if isinstance(node_days, dict):
+        add_days = sum(int(v) for v in node_days.values())
+    else:
+        add_days = int(answers.get("_calc_days", 0))
+
+    branch_type = str(answers.get("new_site_type", ""))
+    if "Товары и услуги" in branch_type or "combo_priority" in answers:
         base_budget = float(await get_setting("calc_base_multipage", "80000"))
         base_days = 20
-    elif "Услуги" in branch_type or "Лендинг" in str(answers):
+    elif "Товары" in branch_type:
+        base_budget = float(await get_setting("calc_base_multipage", "60000"))
+        base_days = 15
+    elif "Услуги" in branch_type:
         base_budget = float(await get_setting("calc_base_landing", "40000"))
         base_days = 10
-    elif "promo" in str(answers):
+    elif any(k.startswith("promo_") for k in answers.keys()):
         base_budget = float(await get_setting("calc_base_promo", "35000"))
         base_days = 7
+    elif any(k.startswith("fix_") for k in answers.keys()):
+        base_budget = 25000.0
+        base_days = 5
     else:
         base_budget = 35000.0
         base_days = 7
@@ -41,64 +62,100 @@ async def calculate_project_estimate(session: dict) -> tuple[str, str]:
     timeline_str = f"{weeks}–{weeks + 1} нед."
     return budget_str, timeline_str
 
-# Базовые стандартные вопросы сценария в строгом порядке
+
+# Полный перечень вопросов сценария в строгом порядке для карточки лида и Excel
 STANDARD_QUESTIONS_ORDER = [
     ("new_site_type", "Тип сайта"),
     ("new_site_other_input", "Свой вариант типа сайта"),
+    ("combo_priority", "Приоритет (Товары + Услуги)"),
+    ("combo_sphere", "Сфера деятельности (Товары + Услуги)"),
+    ("combo_sphere_other_input", "Своя сфера (Товары + Услуги)"),
     ("goods_payment", "Онлайн-оплата (Товары)"),
     ("goods_delivery", "Расчет доставки (СДЭК/Почта)"),
     ("goods_stock", "Учет остатков (1С/МойСклад)"),
     ("goods_crm", "Интеграция с CRM"),
     ("goods_features", "Требуемый функционал"),
+    ("goods_features_other_input", "Доп. функционал (вручную)"),
     ("goods_variations", "Вариации товаров"),
+    ("goods_variations_other_input", "Свои вариации товаров"),
     ("goods_count", "Количество товаров"),
     ("goods_import_format", "Передача данных товаров"),
     ("services_sphere", "Сфера услуг"),
     ("services_sphere_other_input", "Своя сфера услуг"),
     ("services_structure", "Структура сайта"),
     ("services_content", "Наполнение и тексты"),
-    ("services_payment", "Оплата услуг"),
-    ("services_crm", "CRM для услуг"),
+    ("services_content_other_input", "Свое описание наполнения"),
+    ("services_payment", "Оплата на сайте (Услуги)"),
+    ("services_crm", "CRM и чаты (Услуги)"),
     ("services_popup", "Всплывающие окна (Pop-up)"),
-    ("combo_priority", "Приоритет каталога"),
+    ("services_popup_count_input", "Количество и описание Pop-up окон"),
     ("sections_main_page", "Основные страницы"),
-    ("sections_catalog_page", "Страницы услуг/товаров"),
-    ("sections_trust_page", "Блоки доверия и отзывов"),
-    ("sections_portfolio_page", "Разделы портфолио"),
+    ("sections_main_other_input", "Свой вариант (Основные страницы)"),
+    ("sections_catalog_page", "Страницы услуг и товаров"),
+    ("sections_catalog_other_input", "Свой вариант (Услуги и товары)"),
+    ("sections_trust_page", "Доверие и отзывы"),
+    ("sections_trust_other_input", "Свой вариант (Доверие и отзывы)"),
+    ("sections_portfolio_page", "Портфолио и проекты"),
+    ("sections_portfolio_other_input", "Свой вариант (Портфолио)"),
     ("sections_legal_page", "Правовая информация"),
+    ("sections_other_input", "Дополнительные страницы (Иное)"),
     ("design_style_page", "Пожелания по дизайну"),
+    ("combo_flows_page", "Разные потоки (купить / заказать услугу)"),
     ("design_examples_page", "Примеры сайтов"),
-    ("input_examples_link", "Ссылка на пример сайта"),
-    ("input_examples_other", "Описание примера"),
-    ("promo_target", "Объекты продвижения"),
-    ("promo_types_page", "Интересующие каналы рекламы"),
-    ("promo_current_status", "Текущий статус рекламы"),
-    ("promo_format_page", "Формат работы"),
-    ("promo_geo_page", "География рекламы"),
-    ("promo_goals_page", "Цели продвижения"),
-    ("promo_url_input", "Ссылка на аудит рекламы"),
-    ("fix_platform", "CMS текущего сайта"),
-    ("fix_tasks_page", "Список задач на доработку"),
+    ("input_examples_link", "Ссылка и комментарий к примеру"),
+    ("input_tz_file", "Файл ТЗ"),
+    ("input_examples_other", "Описание примеров в свободной форме"),
+    ("promo_target", "Что продвигаем"),
+    ("promo_target_other_input", "Свой объект продвижения"),
+    ("promo_link_site", "Ссылка на сайт (Продвижение)"),
+    ("promo_link_social", "Ссылка на соцсети"),
+    ("promo_link_2gis", "Ссылка на 2ГИС"),
+    ("promo_link_yabiz", "Ссылка на Яндекс Бизнес"),
+    ("promo_link_yamaps", "Ссылка на Яндекс Карты"),
+    ("promo_link_yaserv", "Ссылка на Яндекс Услуги"),
+    ("promo_types_page", "Интересующие типы продвижения"),
+    ("promo_types_other_input", "Свой тип продвижения"),
+    ("promo_current_status", "Текущее продвижение"),
+    ("promo_current_paid_input", "Какая платная реклама используется"),
+    ("promo_current_unknown_input", "Описание текущих действий по рекламе"),
+    ("promo_current_past_input", "Как продвигали раньше"),
+    ("promo_helped_page", "Кто помогал с продвижением ранее"),
+    ("promo_helped_other_input", "Кто помогал (свой вариант)"),
+    ("promo_format_page", "Формат работы (настройка / ведение)"),
+    ("promo_format_other_input", "Уточнение по формату продвижения"),
+    ("promo_geo_page", "География продвижения"),
+    ("promo_goals_page", "Цели рекламы"),
+    ("promo_url_input", "Ссылка на сайт для анализа рекламы"),
+    ("fix_platform", "Платформа/CMS сайта"),
+    ("fix_platform_other_input", "Своя платформа/CMS"),
+    ("fix_tasks_page", "Задачи по доработке сайта"),
+    ("fix_tasks_other_input", "Свои пожелания по доработке"),
     ("fix_url_input", "Ссылка на дорабатываемый сайт"),
-    ("fix_rebuild_page", "Готовность к пересборке"),
-    ("fix_access_page", "Наличие доступов")
+    ("fix_rebuild_page", "Готовность к полной пересборке"),
+    ("fix_promo_status_page", "Текущее продвижение дорабатываемого сайта"),
+    ("fix_promo_other_input", "Как продвигается сайт (уточнение)"),
+    ("fix_access_page", "Наличие доступов от сайта"),
+    ("fix_access_other_input", "Ситуация с доступами"),
+    ("case_other_input", "Запрос примеров из портфолио (Иное)"),
+    ("portfolio_order_choice", "Выбранная услуга из портфолио")
 ]
+
 
 async def format_answers_summary(answers: dict) -> str:
     """
-    Умный генератор брифа:
-    1. Сначала выводит базовые стандартные вопросы из ТЗ.
-    2. Затем внизу отдельным блоком дописывает ВСЕ кастомные вопросы админа (текст и чекбоксы).
+    Генератор брифа:
+    1. Выводит ответы по всем стандартным вопросам сценария.
+    2. Внизу отдельным блоком дописывает ответы на кастомные экраны, созданные через CMS.
     """
     ignored_keys = {
-        "_calc_budget", "_calc_days", "preferred_time", "tz_file_id", 
+        "_calc_budget", "_calc_days", "_node_budgets", "_node_days",
+        "_step_queue", "preferred_time", "tz_file_id",
         "_privacy_accepted", "final_lead_name", "final_lead_phone", "final_lead_messenger"
     }
     standard_keys_set = {k for k, _ in STANDARD_QUESTIONS_ORDER}
 
     lines = []
 
-    # 1. СТАНДАРТНАЯ ЧАСТЬ БРИФА (СВЕРХУ)
     for key, label in STANDARD_QUESTIONS_ORDER:
         if key in answers:
             val = answers[key]
@@ -106,13 +163,11 @@ async def format_answers_summary(answers: dict) -> str:
             if val_str:
                 lines.append(f"• <b>{label}:</b> {html.escape(val_str)}")
 
-    # 2. КАСТОМНАЯ ЧАСТЬ: ВСЕ ДОБАВЛЕННЫЕ ВЛАДЕЛЬЦЕМ ЭКРАНЫ (ВНИЗУ)
     custom_lines = []
     for key, val in answers.items():
-        if key in standard_keys_set or key in ignored_keys:
+        if key in standard_keys_set or key in ignored_keys or key.startswith("_"):
             continue
-        
-        # Получаем живой текст экрана из базы, чтобы бриф был понятным
+
         node = await get_node(key)
         if node and node.get("text"):
             raw_text = node["text"]
@@ -132,6 +187,7 @@ async def format_answers_summary(answers: dict) -> str:
 
     return "\n".join(lines) if lines else "Ответы не зафиксированы"
 
+
 async def finalize_lead_submission(bot: Bot, user_id: int, callback: CallbackQuery = None, message: Message = None):
     session = await get_or_create_session(user_id)
     answers = session.get("answers", {})
@@ -147,9 +203,9 @@ async def finalize_lead_submission(bot: Bot, user_id: int, callback: CallbackQue
     answers_summary = await format_answers_summary(answers)
 
     branch = "Новый сайт"
-    if "promo" in str(answers):
+    if any(k.startswith("promo_") for k in answers.keys()):
         branch = "Продвижение"
-    elif "fix" in str(answers):
+    elif any(k.startswith("fix_") for k in answers.keys()):
         branch = "Доработка сайта"
 
     username = callback.from_user.username if callback else (message.from_user.username if message else "")
@@ -166,7 +222,7 @@ async def finalize_lead_submission(bot: Bot, user_id: int, callback: CallbackQue
         budget_estimate=f"{budget_estimate} ({timeline_estimate})"
     )
 
-    # 1. Ответ клиенту
+    # 1. Завершающее сообщение клиенту (строго по стр. 23-24 ТЗ + блок оценки проекта)
     client_text = (
         f"🎉 <b>Спасибо за заявку, {html.escape(client_name)}!</b>\n\n"
         "Мы обязательно с вами свяжемся в ближайшее время — обсудим всё подробно "
@@ -175,7 +231,7 @@ async def finalize_lead_submission(bot: Bot, user_id: int, callback: CallbackQue
         f"📊 <b>Предварительная оценка проекта:</b>\n"
         f"• Ориентировочный бюджет: <b>{budget_estimate}</b>\n"
         f"• Срок реализации: <b>{timeline_estimate}</b>\n"
-        f"<i>(Точную смету с этапами оплат зафиксируем на коротком звонке)</i>\n\n"
+        f"<i>(Точную смету с этапами оплат зафиксируем после короткого обсуждения)</i>\n\n"
         "💬 Если появятся дополнительные вопросы — смело пишите сюда, бот всегда на связи."
     )
 
@@ -226,7 +282,6 @@ async def finalize_lead_submission(bot: Bot, user_id: int, callback: CallbackQue
         f"📋 <b>БРИФ:</b>\n"
     )
 
-    # Защита от лимита Telegram: обрезаем бриф, если текст слишком длинный
     max_summary_len = 4000 - len(base_info)
     if len(answers_summary) > max_summary_len:
         answers_summary = answers_summary[:max_summary_len - 50] + "\n... <i>(полный бриф сохранен в Excel-выгрузке)</i>"
@@ -250,5 +305,3 @@ async def finalize_lead_submission(bot: Bot, user_id: int, callback: CallbackQue
                 )
         except Exception as e:
             logger.error(f"Не удалось доставить заявку {lead_code} адресату {dest_id}: {e}")
-
-    await reset_session(user_id, keep_privacy=True)
