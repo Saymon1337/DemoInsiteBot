@@ -1,6 +1,7 @@
 import re
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
+
 def is_valid_telegram_button_url(url: str) -> bool:
     """Проверяет валидность URL-ссылки для инлайн-кнопки Telegram."""
     if not url:
@@ -14,29 +15,37 @@ def is_valid_telegram_button_url(url: str) -> bool:
     )
     return bool(pattern.match(u))
 
-def build_node_keyboard(node: dict, buttons: list[dict], selected_items: list[str] = None, is_admin: bool = False, is_client_preview: bool = False) -> InlineKeyboardMarkup:
+
+def build_node_keyboard(
+    node: dict,
+    buttons: list[dict],
+    selected_items: list[str] = None,
+    is_admin: bool = False,
+    is_client_preview: bool = False
+) -> InlineKeyboardMarkup:
     if not node:
         node = {}
-        
+
     selected_items = selected_items or []
     node_type = node.get("node_type", "regular")
     node_id = node.get("id", "main_menu")
 
     rows_dict = {}
-    has_back_button = False
+    back_buttons = []
 
     for btn in buttons:
-        r_idx = btn.get("row_idx", 0)
-        if r_idx not in rows_dict:
-            rows_dict[r_idx] = []
-
         btn_id = btn["id"]
         btn_text = btn["text"]
         action = btn.get("action_type", "navigate")
         url_link = btn.get("url", "")
+        r_idx = btn.get("row_idx", 0)
 
         if action == "back":
-            has_back_button = True
+            back_buttons.append(InlineKeyboardButton(text=btn_text, callback_data=f"btn:{btn_id}"))
+            continue
+
+        if r_idx not in rows_dict:
+            rows_dict[r_idx] = []
 
         if node_type == "multiselect" and action == "toggle":
             is_checked = (btn_text in selected_items)
@@ -50,15 +59,18 @@ def build_node_keyboard(node: dict, buttons: list[dict], selected_items: list[st
 
     keyboard_grid = [rows_dict[r] for r in sorted(rows_dict.keys())]
 
-    # Для мультивыбора всегда добавляем кнопку Готово
+    # Для мультивыбора всегда добавляем кнопку подтверждения перед кнопкой Назад
     if node_type == "multiselect":
-        keyboard_grid.append([InlineKeyboardButton(text="✅ Готово, продолжить ➡️", callback_data="multi_done")])
+        done_text = "➡️ Продолжить" if node_id == "final_lead_messenger" else "✅ Готово, продолжить ➡️"
+        keyboard_grid.append([InlineKeyboardButton(text=done_text, callback_data="multi_done")])
 
-    # Если это не главное меню и нет кнопки Назад — автоматически добавляем ее для клиента
-    if node_id not in ("main_menu", "privacy_block") and not has_back_button:
+    # Кнопка «Назад» всегда располагается под основными кнопками
+    if back_buttons:
+        keyboard_grid.append(back_buttons)
+    elif node_id not in ("main_menu", "privacy_block", "portfolio_order_choice", "contacts_screen"):
         keyboard_grid.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="btn_back")])
 
-    # 1. Если это режим просмотра глазами клиента — показываем кнопки возврата в админку!
+    # 1. Режим просмотра глазами клиента (с возвратом в редактор)
     if is_client_preview:
         keyboard_grid.append([
             InlineKeyboardButton(text="🛠 Вернуться в редактор", callback_data=f"adm_preview_node:{node_id}")
@@ -67,7 +79,7 @@ def build_node_keyboard(node: dict, buttons: list[dict], selected_items: list[st
             InlineKeyboardButton(text="🚪 В главное меню админки", callback_data="adm_back_dash")
         ])
 
-    # 2. Если это полноценный режим редактора администратора
+    # 2. Полноценный режим редактора администратора
     elif is_admin:
         keyboard_grid.append([
             InlineKeyboardButton(text="✏️ Текст", callback_data=f"adm_edit_txt:{node_id}"),
@@ -80,6 +92,7 @@ def build_node_keyboard(node: dict, buttons: list[dict], selected_items: list[st
         ])
 
     return InlineKeyboardMarkup(inline_keyboard=keyboard_grid)
+
 
 def get_lead_card_kb(lead_code: str) -> InlineKeyboardMarkup:
     clean_code = lead_code.lstrip("#")
