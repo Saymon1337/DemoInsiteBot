@@ -1,40 +1,43 @@
+import asyncio
 import aiosqlite
 from contextlib import asynccontextmanager
 
 DB_NAME = "agency.db"
 
 _db_conn: aiosqlite.Connection | None = None
+_db_lock = asyncio.Lock()
 
 
 @asynccontextmanager
 async def get_db():
     """
-    Переиспользует единое постоянное соединение с SQLite в режиме WAL.
-    Исключает создание десятков потоков на каждый клик и ошибки 'database is locked'.
+    Единое постоянное соединение с SQLite в режиме WAL с асинхронной очередью.
+    Создает ровно 1 поток на всё время работы бота — полностью исключает зависание хоста.
     """
     global _db_conn
-    if _db_conn is None:
-        _db_conn = await aiosqlite.connect(DB_NAME, timeout=30.0)
-        _db_conn.row_factory = aiosqlite.Row
-        await _db_conn.execute("PRAGMA journal_mode=WAL")
-        await _db_conn.execute("PRAGMA synchronous=NORMAL")
-        await _db_conn.execute("PRAGMA busy_timeout=15000")
-        await _db_conn.commit()
-    yield _db_conn
+    async with _db_lock:
+        if _db_conn is None:
+            _db_conn = await aiosqlite.connect(DB_NAME, timeout=30.0)
+            _db_conn.row_factory = aiosqlite.Row
+            await _db_conn.execute("PRAGMA journal_mode=WAL")
+            await _db_conn.execute("PRAGMA synchronous=NORMAL")
+            await _db_conn.execute("PRAGMA busy_timeout=15000")
+            await _db_conn.commit()
+        yield _db_conn
 
 
 async def close_db():
     """Корректное закрытие соединения при остановке бота."""
     global _db_conn
-    if _db_conn is not None:
-        await _db_conn.close()
-        _db_conn = None
+    async with _db_lock:
+        if _db_conn is not None:
+            await _db_conn.close()
+            _db_conn = None
 
 
 async def init_db():
     """Создание таблиц и однократная миграция при старте бота."""
     async with get_db() as db:
-        # 1. Таблица пользователей с гранулярными правами доступа
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,7 +57,6 @@ async def init_db():
             )
         """)
 
-        # 2. Таблица экранов (Nodes)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS nodes (
                 id TEXT PRIMARY KEY,
@@ -67,7 +69,6 @@ async def init_db():
             )
         """)
 
-        # 3. Таблица кнопок (Buttons)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS buttons (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -84,7 +85,6 @@ async def init_db():
             )
         """)
 
-        # 4. Пользовательские сессии
         await db.execute("""
             CREATE TABLE IF NOT EXISTS user_sessions (
                 user_id INTEGER PRIMARY KEY,
@@ -96,7 +96,6 @@ async def init_db():
             )
         """)
 
-        # 5. База заявок (Leads / CRM)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS leads (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -117,7 +116,6 @@ async def init_db():
             )
         """)
 
-        # 6. Настройки системы
         await db.execute("""
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
@@ -125,7 +123,6 @@ async def init_db():
             )
         """)
 
-        # 7. История названий кнопок
         await db.execute("""
             CREATE TABLE IF NOT EXISTS button_history (
                 btn_key TEXT,
@@ -135,7 +132,6 @@ async def init_db():
         """)
         await db.commit()
 
-        # Автомиграция колонок (выполняется ТОЛЬКО 1 раз при запуске бота!)
         user_cols = [
             ("role_title", "TEXT DEFAULT 'Менеджер'"),
             ("can_leads", "INTEGER DEFAULT 1"),
@@ -151,7 +147,6 @@ async def init_db():
             except Exception:
                 pass
 
-        # Дефолтные настройки агентства
         default_settings = [
             ('leads_channel_id', ''),
             ('leads_channel_title', ''),
