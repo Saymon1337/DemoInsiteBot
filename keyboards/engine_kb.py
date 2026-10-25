@@ -32,6 +32,7 @@ def build_node_keyboard(
 
     rows_dict = {}
     back_buttons = []
+    has_custom_back = False
 
     for btn in buttons:
         btn_id = btn["id"]
@@ -39,6 +40,11 @@ def build_node_keyboard(
         action = btn.get("action_type", "navigate")
         url_link = btn.get("url", "")
         r_idx = btn.get("row_idx", 0)
+
+        # Проверяем, есть ли уже на экране собственная кнопка возврата
+        low_text = btn_text.lower()
+        if "назад" in low_text or "главное меню" in low_text:
+            has_custom_back = True
 
         if action == "back":
             back_buttons.append(InlineKeyboardButton(text=btn_text, callback_data=f"btn:{btn_id}"))
@@ -64,10 +70,10 @@ def build_node_keyboard(
         done_text = "➡️ Продолжить" if node_id == "final_lead_messenger" else "✅ Готово, продолжить ➡️"
         keyboard_grid.append([InlineKeyboardButton(text=done_text, callback_data="multi_done")])
 
-    # Кнопка «Назад» всегда располагается под основными кнопками
+    # Кнопка «Назад» добавляется только если на экране еще нет своей кнопки возврата
     if back_buttons:
         keyboard_grid.append(back_buttons)
-    elif node_id not in ("main_menu", "privacy_block", "portfolio_order_choice", "contacts_screen"):
+    elif not has_custom_back and node_id not in ("main_menu", "privacy_block", "portfolio_order_choice", "contacts_screen"):
         keyboard_grid.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="btn_back")])
 
     # 1. Режим просмотра глазами клиента (с возвратом в редактор)
