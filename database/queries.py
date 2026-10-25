@@ -1,8 +1,7 @@
-import aiosqlite
 import json
 import time
 from config import OWNER_ID
-from database.db import DB_NAME
+from database.db import get_db
 from scenario.data import SCENARIO_NODES
 
 
@@ -15,44 +14,10 @@ def safe_json_loads(data: str, default=None):
         return default if default is not None else {}
 
 
-async def ensure_users_schema(db):
-    await db.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            tg_id INTEGER UNIQUE,
-            username TEXT,
-            full_name TEXT DEFAULT '',
-            saved_name TEXT DEFAULT '',
-            phone TEXT DEFAULT '',
-            role TEXT DEFAULT 'client',
-            role_title TEXT DEFAULT 'Менеджер',
-            can_leads INTEGER DEFAULT 1,
-            can_calc INTEGER DEFAULT 0,
-            can_content INTEGER DEFAULT 0,
-            can_broadcast INTEGER DEFAULT 0,
-            can_export INTEGER DEFAULT 1,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    for col, cdef in [
-        ("role_title", "TEXT DEFAULT 'Менеджер'"),
-        ("can_leads", "INTEGER DEFAULT 1"),
-        ("can_calc", "INTEGER DEFAULT 0"),
-        ("can_content", "INTEGER DEFAULT 0"),
-        ("can_broadcast", "INTEGER DEFAULT 0"),
-        ("can_export", "INTEGER DEFAULT 1")
-    ]:
-        try:
-            await db.execute(f"ALTER TABLE users ADD COLUMN {col} {cdef}")
-        except Exception:
-            pass
-    await db.commit()
-
-
 # --- Настройки ---
 
 async def get_text(key: str, default: str = "") -> str:
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_db() as db:
         async with db.execute("SELECT value FROM settings WHERE key = ?", (key,)) as cursor:
             row = await cursor.fetchone()
             return row[0] if row else default
@@ -60,18 +25,14 @@ async def get_text(key: str, default: str = "") -> str:
 
 async def set_text(key: str, value: str):
     old_value = await get_text(key)
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS button_history (
-                btn_key TEXT,
-                old_text TEXT,
-                PRIMARY KEY (btn_key, old_text)
-            )
-        """)
+    async with get_db() as db:
         if old_value and old_value != value and key.startswith("btn_"):
             await db.execute("INSERT OR IGNORE INTO button_history (btn_key, old_text) VALUES (?, ?)", (key, old_value))
 
-        await db.execute("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, value))
+        await db.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value)
+        )
         await db.commit()
 
 
@@ -87,9 +48,7 @@ async def set_setting(key: str, value: str):
 
 async def add_or_update_user(tg_id: int, username: str, full_name: str, default_role: str = 'client'):
     clean_un = (username or "").strip().lstrip('@').lower()
-    async with aiosqlite.connect(DB_NAME) as db:
-        await ensure_users_schema(db)
-        db.row_factory = aiosqlite.Row
+    async with get_db() as db:
         if clean_un:
             async with db.execute("SELECT * FROM users WHERE LOWER(LTRIM(username, '@')) = ?", (clean_un,)) as cur:
                 rows = [dict(r) for r in await cur.fetchall()]
@@ -116,9 +75,7 @@ async def get_user_permissions(user_id: int, username: str = "") -> dict:
             "can_leads": True, "can_calc": True, "can_content": True, "can_broadcast": True, "can_export": True
         }
     clean_un = (username or "").strip().lstrip('@').lower()
-    async with aiosqlite.connect(DB_NAME) as db:
-        await ensure_users_schema(db)
-        db.row_factory = aiosqlite.Row
+    async with get_db() as db:
         row = None
         async with db.execute("SELECT * FROM users WHERE tg_id = ? AND role IN ('staff', 'owner')", (user_id,)) as cur:
             row = await cur.fetchone()
@@ -143,9 +100,7 @@ async def get_user_permissions(user_id: int, username: str = "") -> dict:
 
 async def set_user_role_by_username(username_or_id: str, role: str = 'staff', role_title: str = 'Менеджер') -> int:
     clean = username_or_id.strip().lstrip('@')
-    async with aiosqlite.connect(DB_NAME) as db:
-        await ensure_users_schema(db)
-        db.row_factory = aiosqlite.Row
+    async with get_db() as db:
         if clean.isdigit():
             tg_val = int(clean)
             async with db.execute("SELECT id FROM users WHERE tg_id = ?", (tg_val,)) as cur:
@@ -184,8 +139,7 @@ async def apply_staff_role_preset(db_user_id: int, preset_key: str):
     if preset_key not in presets:
         return
     title, leads, calc, content, bcast, exp = presets[preset_key]
-    async with aiosqlite.connect(DB_NAME) as db:
-        await ensure_users_schema(db)
+    async with get_db() as db:
         await db.execute("""
             UPDATE users SET role_title = ?, can_leads = ?, can_calc = ?, can_content = ?, can_broadcast = ?, can_export = ? WHERE id = ?
         """, (title, leads, calc, content, bcast, exp, db_user_id))
@@ -195,24 +149,19 @@ async def apply_staff_role_preset(db_user_id: int, preset_key: str):
 async def toggle_staff_permission(db_user_id: int, perm_key: str):
     if perm_key not in {"can_leads", "can_calc", "can_content", "can_broadcast", "can_export"}:
         return
-    async with aiosqlite.connect(DB_NAME) as db:
-        await ensure_users_schema(db)
+    async with get_db() as db:
         await db.execute(f"UPDATE users SET {perm_key} = CASE WHEN {perm_key} = 1 THEN 0 ELSE 1 END WHERE id = ?", (db_user_id,))
         await db.commit()
 
 
 async def get_all_staff() -> list[dict]:
-    async with aiosqlite.connect(DB_NAME) as db:
-        await ensure_users_schema(db)
-        db.row_factory = aiosqlite.Row
+    async with get_db() as db:
         async with db.execute("SELECT * FROM users WHERE role IN ('owner', 'staff') OR tg_id = ? ORDER BY id ASC", (OWNER_ID,)) as cursor:
             return [dict(r) for r in await cursor.fetchall()]
 
 
 async def get_staff_by_db_id(db_id: int) -> dict | None:
-    async with aiosqlite.connect(DB_NAME) as db:
-        await ensure_users_schema(db)
-        db.row_factory = aiosqlite.Row
+    async with get_db() as db:
         async with db.execute("SELECT * FROM users WHERE id = ?", (db_id,)) as cursor:
             row = await cursor.fetchone()
             return dict(row) if row else None
@@ -228,33 +177,32 @@ async def get_staff_and_owner_ids() -> list[int]:
 
 
 async def get_user_profile(tg_id: int):
-    async with aiosqlite.connect(DB_NAME) as db:
-        await ensure_users_schema(db)
-        db.row_factory = aiosqlite.Row
+    async with get_db() as db:
         async with db.execute("SELECT saved_name, phone FROM users WHERE tg_id = ?", (tg_id,)) as cursor:
             row = await cursor.fetchone()
             return dict(row) if row else None
 
 
 async def save_user_profile(tg_id: int, saved_name: str, phone: str):
-    async with aiosqlite.connect(DB_NAME) as db:
-        await ensure_users_schema(db)
-        await db.execute("INSERT INTO users (tg_id, saved_name, phone) VALUES (?, ?, ?) ON CONFLICT(tg_id) DO UPDATE SET saved_name = excluded.saved_name, phone = excluded.phone", (tg_id, saved_name, phone))
+    async with get_db() as db:
+        await db.execute(
+            "INSERT INTO users (tg_id, saved_name, phone) VALUES (?, ?, ?) ON CONFLICT(tg_id) DO UPDATE SET saved_name = excluded.saved_name, phone = excluded.phone",
+            (tg_id, saved_name, phone)
+        )
         await db.commit()
 
 
 async def get_user_role(user_id: int) -> str:
     if user_id == OWNER_ID:
         return 'owner'
-    async with aiosqlite.connect(DB_NAME) as db:
-        await ensure_users_schema(db)
+    async with get_db() as db:
         async with db.execute("SELECT role FROM users WHERE tg_id = ?", (user_id,)) as cursor:
             row = await cursor.fetchone()
             return row[0] if row else 'client'
 
 
 async def get_all_users_by_target(target: str = "all") -> list[int]:
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_db() as db:
         async with db.execute("SELECT user_id FROM user_sessions") as cursor:
             rows = await cursor.fetchall()
             return [r[0] for r in rows if r[0]] or [OWNER_ID]
@@ -263,23 +211,21 @@ async def get_all_users_by_target(target: str = "all") -> list[int]:
 # --- КОНСТРУКТОР ЭКРАНОВ, ПОРЯДОК, БЭКАП И ВОССТАНОВЛЕНИЕ ---
 
 async def get_node(node_id: str) -> dict | None:
-    async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db() as db:
         async with db.execute("SELECT * FROM nodes WHERE id = ?", (node_id,)) as cursor:
             row = await cursor.fetchone()
             return dict(row) if row else None
 
 
 async def get_all_nodes_list() -> list[dict]:
-    async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db() as db:
         async with db.execute("SELECT id, text, node_type FROM nodes ORDER BY id ASC") as cursor:
             return [dict(r) for r in await cursor.fetchall()]
 
 
 async def create_custom_node(text: str, node_type: str = 'regular', next_node_id: str = 'main_menu') -> str:
     new_node_id = f"custom_{int(time.time())}"
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_db() as db:
         await db.execute("""
             INSERT INTO nodes (id, text, node_type, next_node_id, budget_weight, timeline_days)
             VALUES (?, ?, ?, ?, 0.0, 0)
@@ -293,11 +239,10 @@ async def create_custom_node(text: str, node_type: str = 'regular', next_node_id
 
 
 async def delete_custom_node(node_id: str) -> tuple[bool, str]:
-    """Защищает все базовые экраны сценария от удаления (удалять можно только созданные через CMS custom_* экраны)."""
     protected = {n["id"] for n in SCENARIO_NODES}
     if node_id in protected:
         return False, "Это базовый экран сценария, его нельзя удалить (вы можете изменить его текст или кнопки)."
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_db() as db:
         await db.execute("DELETE FROM buttons WHERE node_id = ? OR target_node_id = ?", (node_id, node_id))
         await db.execute("DELETE FROM nodes WHERE id = ?", (node_id,))
         await db.commit()
@@ -305,8 +250,7 @@ async def delete_custom_node(node_id: str) -> tuple[bool, str]:
 
 
 async def export_scenario_json() -> str:
-    async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db() as db:
         async with db.execute("SELECT * FROM nodes") as c1:
             nodes = [dict(r) for r in await c1.fetchall()]
         async with db.execute("SELECT * FROM buttons ORDER BY row_idx ASC, order_idx ASC") as c2:
@@ -322,7 +266,7 @@ async def import_scenario_json(json_str: str) -> tuple[bool, str]:
         if not isinstance(data, list) or not data:
             return False, "Файл не содержит корректного списка экранов (nodes)."
 
-        async with aiosqlite.connect(DB_NAME) as db:
+        async with get_db() as db:
             await db.execute("DELETE FROM buttons")
             await db.execute("DELETE FROM nodes")
 
@@ -364,15 +308,13 @@ async def import_scenario_json(json_str: str) -> tuple[bool, str]:
 
 
 async def get_node_buttons(node_id: str) -> list[dict]:
-    async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db() as db:
         async with db.execute("SELECT * FROM buttons WHERE node_id = ? ORDER BY row_idx ASC, order_idx ASC, id ASC", (node_id,)) as cursor:
             return [dict(r) for r in await cursor.fetchall()]
 
 
 async def get_button_by_id(btn_id: int) -> dict | None:
-    async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db() as db:
         async with db.execute("SELECT * FROM buttons WHERE id = ?", (btn_id,)) as cursor:
             row = await cursor.fetchone()
             return dict(row) if row else None
@@ -397,7 +339,7 @@ async def move_button_to_position(btn_id: int, new_pos_1based: int) -> tuple[boo
     item = content_btns.pop(cur_idx)
     content_btns.insert(target_idx, item)
 
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_db() as db:
         for idx, b in enumerate(content_btns):
             await db.execute("UPDATE buttons SET row_idx = ?, order_idx = 0 WHERE id = ?", (idx, b["id"]))
         for b in back_btns:
@@ -422,7 +364,7 @@ async def swap_button_step(btn_id: int, direction: str) -> bool:
 
 
 async def update_button_text(btn_id: int, new_text: str):
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_db() as db:
         await db.execute("UPDATE buttons SET text = ? WHERE id = ?", (new_text, btn_id))
         await db.commit()
 
@@ -430,19 +372,19 @@ async def update_button_text(btn_id: int, new_text: str):
 async def update_button_target(btn_id: int, action_type: str, target_val: str):
     url = target_val if action_type == "url" else ""
     target_node = target_val if action_type == "navigate" else ""
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_db() as db:
         await db.execute("UPDATE buttons SET action_type = ?, target_node_id = ?, url = ? WHERE id = ?", (action_type, target_node, url, btn_id))
         await db.commit()
 
 
 async def update_button_weights(btn_id: int, budget_weight: float, timeline_days: int):
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_db() as db:
         await db.execute("UPDATE buttons SET budget_weight = ?, timeline_days = ? WHERE id = ?", (budget_weight, timeline_days, btn_id))
         await db.commit()
 
 
 async def update_node_text(node_id: str, new_text: str):
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_db() as db:
         await db.execute("UPDATE nodes SET text = ? WHERE id = ?", (new_text, node_id))
         await db.commit()
 
@@ -453,7 +395,7 @@ async def add_button(node_id: str, text: str, action_type: str, target_node_id: 
         content_btns = [b for b in buttons if b.get("action_type") != "back"]
         row_idx = len(content_btns)
 
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_db() as db:
         await db.execute("""
             INSERT INTO buttons (node_id, text, action_type, target_node_id, url, budget_weight, timeline_days, row_idx)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -462,7 +404,7 @@ async def add_button(node_id: str, text: str, action_type: str, target_node_id: 
 
 
 async def delete_button(button_id: int):
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_db() as db:
         await db.execute("DELETE FROM buttons WHERE id = ?", (button_id,))
         await db.commit()
 
@@ -470,8 +412,7 @@ async def delete_button(button_id: int):
 # --- Сессии и Стек истории ---
 
 async def get_or_create_session(user_id: int) -> dict:
-    async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db() as db:
         async with db.execute("SELECT * FROM user_sessions WHERE user_id = ?", (user_id,)) as cursor:
             row = await cursor.fetchone()
         if not row:
@@ -493,7 +434,7 @@ async def update_session_node(user_id: int, new_node_id: str, push_history: bool
     history = session["history"]
     if push_history and session["current_node_id"] and session["current_node_id"] != new_node_id:
         history.append(session["current_node_id"])
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_db() as db:
         await db.execute(
             "UPDATE user_sessions SET current_node_id = ?, history_json = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
             (new_node_id, json.dumps(history, ensure_ascii=False), user_id)
@@ -502,7 +443,6 @@ async def update_session_node(user_id: int, new_node_id: str, push_history: bool
 
 
 async def pop_session_history(user_id: int) -> str:
-    """Возвращает предыдущий экран из стека и очищает начисленные веса покинутого шага."""
     session = await get_or_create_session(user_id)
     history = session["history"]
     current_node_id = session.get("current_node_id", "")
@@ -521,7 +461,7 @@ async def pop_session_history(user_id: int) -> str:
     answers["_node_budgets"] = node_budgets
     answers["_node_days"] = node_days
 
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_db() as db:
         await db.execute(
             "UPDATE user_sessions SET current_node_id = ?, history_json = ?, answers_json = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
             (prev_node_id, json.dumps(history, ensure_ascii=False), json.dumps(answers, ensure_ascii=False), user_id)
@@ -561,7 +501,7 @@ async def toggle_multiselect_option(user_id: int, node_id: str, option_text: str
             selected.append(option_text)
 
     answers[node_id] = selected
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_db() as db:
         await db.execute("""
             UPDATE user_sessions 
             SET answers_json = ?, 
@@ -576,7 +516,7 @@ async def save_session_answer(user_id: int, key: str, value):
     session = await get_or_create_session(user_id)
     answers = session["answers"]
     answers[key] = value
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_db() as db:
         await db.execute("UPDATE user_sessions SET answers_json = ? WHERE user_id = ?", (json.dumps(answers, ensure_ascii=False), user_id))
         await db.commit()
 
@@ -586,7 +526,7 @@ async def reset_session(user_id: int, keep_privacy: bool = True):
     answers = {}
     if keep_privacy and session.get("answers", {}).get("_privacy_accepted"):
         answers["_privacy_accepted"] = True
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_db() as db:
         await db.execute("""
             UPDATE user_sessions 
             SET current_node_id = 'main_menu', 
@@ -602,7 +542,7 @@ async def reset_session(user_id: int, keep_privacy: bool = True):
 # --- Заявки и CRM ---
 
 async def create_lead(user_id: int, username: str, client_name: str, client_phone: str, messenger: str, preferred_time: str, branch: str, tz_file_id: str, answers_summary: str, budget_estimate: str) -> str:
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_db() as db:
         async with db.execute("SELECT MAX(id) FROM leads") as cursor:
             row = await cursor.fetchone()
             last_id = row[0] or 0
@@ -616,16 +556,14 @@ async def create_lead(user_id: int, username: str, client_name: str, client_phon
 
 
 async def get_all_leads(limit: int = 50) -> list[dict]:
-    async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db() as db:
         async with db.execute("SELECT * FROM leads ORDER BY id DESC LIMIT ?", (limit,)) as cursor:
             return [dict(r) for r in await cursor.fetchall()]
 
 
 async def get_lead_by_code(lead_code: str) -> dict | None:
     clean_code = lead_code if lead_code.startswith("#") else f"#{lead_code}"
-    async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
+    async with get_db() as db:
         async with db.execute("SELECT * FROM leads WHERE lead_code = ?", (clean_code,)) as cursor:
             row = await cursor.fetchone()
             return dict(row) if row else None
@@ -633,7 +571,7 @@ async def get_lead_by_code(lead_code: str) -> dict | None:
 
 async def update_lead_status(lead_code: str, status: str, manager_name: str = ""):
     clean_code = lead_code if lead_code.startswith("#") else f"#{lead_code}"
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_db() as db:
         if manager_name:
             await db.execute("UPDATE leads SET status = ?, manager_name = ? WHERE lead_code = ?", (status, manager_name, clean_code))
         else:
